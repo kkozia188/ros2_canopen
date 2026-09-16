@@ -202,6 +202,78 @@ public:
   virtual size_t count_drivers() { return registered_drivers_.size(); }
 
   /**
+   * @brief Request an NMT Stop broadcast for every node on the bus.
+   *
+   * @return true when the request was submitted to the active master.
+   */
+  bool request_nmt_stop_all_nodes()
+  {
+    try
+    {
+      if (!can_master_ || !can_master_->get_master())
+      {
+        return false;
+      }
+      can_master_->get_master()->Command(lely::canopen::NmtCommand::STOP, 0);
+      return true;
+    }
+    catch (const std::exception & exception)
+    {
+      RCLCPP_ERROR(this->get_logger(), "Failed to request all-node NMT Stop: %s", exception.what());
+      return false;
+    }
+  }
+
+  /**
+   * @brief Shutdown every registered driver while leaving the master running.
+   *
+   * @return true when every driver shutdown completed.
+   */
+  bool shutdown_drivers()
+  {
+    bool success = true;
+    for (const auto & entry : registered_drivers_)
+    {
+      try
+      {
+        entry.second->shutdown();
+      }
+      catch (const std::exception & exception)
+      {
+        RCLCPP_ERROR(
+          this->get_logger(), "Failed to shutdown CANopen driver %u: %s", entry.first,
+          exception.what());
+        success = false;
+      }
+    }
+    return success;
+  }
+
+  /**
+   * @brief Stop and join only the CANopen master runtime.
+   *
+   * @return true when master shutdown completed or no master exists.
+   */
+  bool shutdown_master()
+  {
+    if (!can_master_)
+    {
+      return true;
+    }
+    try
+    {
+      can_master_->shutdown();
+      return true;
+    }
+    catch (const std::exception & exception)
+    {
+      RCLCPP_ERROR(
+        this->get_logger(), "Failed to shutdown CANopen master: %s", exception.what());
+      return false;
+    }
+  }
+
+  /**
    * @brief Get node ids of all drivers with type
    *
    * This function gets the ids of all drivers that have the passed

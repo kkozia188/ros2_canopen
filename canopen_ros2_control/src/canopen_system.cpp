@@ -40,18 +40,32 @@ CanopenSystem::CanopenSystem() {}
 
 void CanopenSystem::clean()
 {
-  executor_->cancel();
-  printf("Joining...");
-  spin_thread_->join();
-  printf("Joined!");
+  if (executor_)
+  {
+    executor_->cancel();
+  }
+
+  if (spin_thread_ && spin_thread_->joinable())
+  {
+    spin_thread_->join();
+  }
+
+  if (device_container_)
+  {
+    if (!device_container_->shutdown_master())
+    {
+      RCLCPP_ERROR(kLogger, "CANopen master shutdown failed");
+    }
+  }
 
   device_container_.reset();
   executor_.reset();
 
-  init_thread_->join();
+  if (init_thread_ && init_thread_->joinable())
+  {
+    init_thread_->join();
+  }
   init_thread_.reset();
-
-  executor_.reset();
   spin_thread_.reset();
 }
 

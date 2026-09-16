@@ -69,6 +69,11 @@ public:
     node_canopen_402_driver_->register_rpdo_cb(rpdo_cb);
   }
 
+  void register_emcy_cb(std::function<void(COEmcy, uint8_t)> emcy_cb)
+  {
+    node_canopen_402_driver_->register_emcy_cb(emcy_cb);
+  }
+
   double get_speed() { return node_canopen_402_driver_->get_speed(); }
 
   double get_position() { return node_canopen_402_driver_->get_position(); }
@@ -77,11 +82,15 @@ public:
 
   bool init_motor() { return node_canopen_402_driver_->init_motor(); }
 
+  bool shutdown_motor() { return node_canopen_402_driver_->shutdown_motor(); }
+
   bool recover_motor() { return node_canopen_402_driver_->recover_motor(); }
 
   bool halt_motor() { return node_canopen_402_driver_->halt_motor(); }
 
   uint16_t get_mode() { return node_canopen_402_driver_->get_mode(); }
+
+  State402::InternalState get_state() { return node_canopen_402_driver_->get_state(); }
 
   bool set_operation_mode(uint16_t mode)
   {

@@ -75,6 +75,8 @@ public:
   virtual bool enterModeAndWait(uint16_t mode);
   virtual bool isModeSupported(uint16_t mode);
   virtual uint16_t getMode();
+
+  State402::InternalState getState() { return state_handler_.getState(); }
   bool readState();
 
   /**

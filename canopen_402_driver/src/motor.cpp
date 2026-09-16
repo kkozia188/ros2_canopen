@@ -47,6 +47,11 @@ uint16_t Motor402::getMode()
 
 bool Motor402::isModeSupportedByDevice(uint16_t mode)
 {
+  if (mode == MotorBase::Homing)
+  {
+    return false;
+  }
+
   uint32_t supported_modes =
     driver->universal_get_value<uint32_t>(supported_drive_modes_index, 0x0);
   bool supported = supported_modes & (1 << (mode - 1));
@@ -409,7 +414,6 @@ bool Motor402::handleInit()
 }
 bool Motor402::handleShutdown()
 {
-  switchMode(MotorBase::No_Mode);
   return switchState(State402::Switch_On_Disabled);
 }
 bool Motor402::handleHalt()

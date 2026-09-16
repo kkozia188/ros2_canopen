@@ -401,7 +401,28 @@ template <class NODETYPE>
 void NodeCanopen402Driver<NODETYPE>::deactivate(bool called_from_base)
 {
   NodeCanopenProxyDriver<NODETYPE>::deactivate(false);
-  timer_->cancel();
+}
+
+template <class NODETYPE>
+void NodeCanopen402Driver<NODETYPE>::cleanup(bool called_from_base)
+{
+  if (motor_)
+  {
+    auto promise = std::make_shared<std::promise<void>>();
+    auto future = promise->get_future();
+    this->exec_->post(
+      [this, promise]()
+      {
+        motor_.reset();
+        promise->set_value();
+      });
+    if (future.wait_for(this->non_transmit_timeout_) != std::future_status::ready)
+    {
+      throw DriverException("cleanup: Motor402 removal timed out");
+    }
+  }
+
+  NodeCanopenProxyDriver<NODETYPE>::cleanup(false);
 }
 
 template <class NODETYPE>
@@ -585,6 +606,16 @@ bool NodeCanopen402Driver<NODETYPE>::init_motor()
     RCLCPP_INFO(this->node_->get_logger(), "Initialisation failed.");
     return false;
   }
+}
+
+template <class NODETYPE>
+bool NodeCanopen402Driver<NODETYPE>::shutdown_motor()
+{
+  if (this->activated_.load())
+  {
+    return motor_->handleShutdown();
+  }
+  return false;
 }
 
 template <class NODETYPE>

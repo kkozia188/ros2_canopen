@@ -42,8 +42,10 @@ public:
   FRIEND_TEST(NodeCanopenDriverTest, test_shutdown);
 
   MockNodeCanopenDriver(rclcpp::Node * node) : NodeCanopenDriver<NODETYPE>(node) {}
+  using NodeCanopenDriver<NODETYPE>::deactivate;
   MOCK_METHOD0_T(add_to_master, void());
   MOCK_METHOD0_T(remove_from_master, void());
+  MOCK_METHOD1_T(deactivate, void(bool));
 
   void DelegateToBase()
   {
@@ -223,6 +225,8 @@ TEST_F(NodeCanopenDriverTest, test_deactivate)
   node_canopen_driver->master_set_.store(true);
   node_canopen_driver->configured_.store(true);
   node_canopen_driver->activated_.store(true);
+  InSequence ordered_shutdown;
+  EXPECT_CALL(*node_canopen_driver, deactivate(true)).Times(1).WillOnce(Return());
   EXPECT_CALL(*node_canopen_driver, remove_from_master()).Times(1).WillOnce(Return());
   node_canopen_driver->deactivate();
   EXPECT_FALSE(node_canopen_driver->activated_.load());

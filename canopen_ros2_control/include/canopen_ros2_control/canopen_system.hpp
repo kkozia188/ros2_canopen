@@ -249,6 +249,7 @@ protected:
   std::unique_ptr<std::thread> init_thread_;
 
   void spin();
+  void stop_callback_executor();
   void clean();
 
 private:

@@ -23,6 +23,15 @@
 //----------------------------------------------------------------------
 
 #include "canopen_ros2_control/cia402_system.hpp"
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
 #include <hardware_interface/types/hardware_interface_type_values.hpp>
 
 namespace
@@ -61,15 +70,31 @@ void Cia402System::initDeviceContainer()
   {
     auto driver = std::static_pointer_cast<ros2_canopen::Cia402Driver>(it->second);
 
-    auto nmt_state_cb = [&](canopen::NmtState nmt_state, uint8_t id)
+    auto nmt_state_cb = [this](canopen::NmtState nmt_state, uint8_t id)
     { canopen_data_[id].nmt_state.set_state(nmt_state); };
     // register callback
     driver->register_nmt_state_cb(nmt_state_cb);
 
-    auto rpdo_cb = [&](ros2_canopen::COData data, uint8_t id)
+    auto rpdo_cb = [this](ros2_canopen::COData data, uint8_t id)
     { canopen_data_[id].rpdo_data.set_data(data); };
     // register callback
     driver->register_rpdo_cb(rpdo_cb);
+
+    auto emcy_cb = [this](ros2_canopen::COEmcy emcy, uint8_t id)
+    {
+      if (emcy.eec == 0U || (id != 2U && id != 3U))
+      {
+        return;
+      }
+      RCLCPP_ERROR(
+        kLogger, "Track node %u reported EMCY 0x%04X; requesting all-node NMT Stop", id,
+        emcy.eec);
+      if (!device_container_->request_nmt_stop_all_nodes())
+      {
+        RCLCPP_ERROR(kLogger, "All-node NMT Stop request failed after track EMCY");
+      }
+    };
+    driver->register_emcy_cb(emcy_cb);
 
     RCLCPP_INFO(
       kLogger, "\nRegistered driver:\n    name: '%s'\n    node_id: '0x%X'",
@@ -227,13 +252,277 @@ std::vector<hardware_interface::CommandInterface> Cia402System::export_command_i
 hardware_interface::CallbackReturn Cia402System::on_activate(
   const rclcpp_lifecycle::State & previous_state)
 {
-  return CanopenSystem::on_activate(previous_state);
+  if (CanopenSystem::on_activate(previous_state) != CallbackReturn::SUCCESS)
+  {
+    return CallbackReturn::ERROR;
+  }
+
+  struct MotorConfiguration
+  {
+    uint8_t node_id;
+    uint16_t operation_mode;
+  };
+
+  std::vector<MotorConfiguration> configurations;
+  for (const auto & joint : info_.joints)
+  {
+    const auto node_parameter = joint.parameters.find("node_id");
+    if (node_parameter == joint.parameters.end())
+    {
+      continue;
+    }
+    const auto mode_parameter = joint.parameters.find("operation_mode");
+    if (mode_parameter == joint.parameters.end())
+    {
+      RCLCPP_ERROR(kLogger, "Joint %s has no operation_mode parameter", joint.name.c_str());
+      return CallbackReturn::ERROR;
+    }
+    try
+    {
+      const auto parsed_node_id = std::stoul(node_parameter->second);
+      const auto parsed_mode = std::stoul(mode_parameter->second);
+      if (
+        parsed_node_id > std::numeric_limits<uint8_t>::max() ||
+        parsed_mode > std::numeric_limits<uint16_t>::max())
+      {
+        throw std::out_of_range("node_id or operation_mode is outside its storage range");
+      }
+      const auto node_id = static_cast<uint8_t>(parsed_node_id);
+      const auto mode = static_cast<uint16_t>(parsed_mode);
+      if (
+        (node_id != 2U && node_id != 3U) || mode != MotorBase::Profiled_Velocity)
+      {
+        RCLCPP_ERROR(
+          kLogger, "Unsupported CANopen activation mapping for joint %s: node=%u mode=%u",
+          joint.name.c_str(), node_id, mode);
+        return CallbackReturn::ERROR;
+      }
+      configurations.push_back({node_id, mode});
+    }
+    catch (const std::exception & exception)
+    {
+      RCLCPP_ERROR(
+        kLogger, "Invalid CANopen parameters for joint %s: %s", joint.name.c_str(),
+        exception.what());
+      return CallbackReturn::ERROR;
+    }
+  }
+  std::sort(
+    configurations.begin(), configurations.end(),
+    [](const MotorConfiguration & lhs, const MotorConfiguration & rhs)
+    { return lhs.node_id < rhs.node_id; });
+
+  if (
+    configurations.size() != 2U || configurations[0].node_id != 2U ||
+    configurations[1].node_id != 3U)
+  {
+    RCLCPP_ERROR(kLogger, "Expected exactly CANopen track motor nodes 2 and 3");
+    return CallbackReturn::ERROR;
+  }
+
+  auto drivers = device_container_->get_registered_drivers();
+  std::vector<uint8_t> completed_nodes;
+  std::string primary_failure;
+  uint8_t primary_node = 0U;
+  for (const auto & configuration : configurations)
+  {
+    const auto driver_iterator = drivers.find(configuration.node_id);
+    if (driver_iterator == drivers.end())
+    {
+      primary_node = configuration.node_id;
+      primary_failure = "driver_lookup";
+      break;
+    }
+    auto driver = std::static_pointer_cast<ros2_canopen::Cia402Driver>(driver_iterator->second);
+    ros2_canopen::COData mode_command = {
+      0x6060U, 0x00U, static_cast<uint32_t>(configuration.operation_mode)};
+    if (!driver->tpdo_transmit(mode_command))
+    {
+      primary_node = configuration.node_id;
+      primary_failure = "prime_operation_mode";
+      break;
+    }
+    RCLCPP_INFO(
+      kLogger, "Primed node %u RPDO mode cache with fixed mode %u", configuration.node_id,
+      configuration.operation_mode);
+    if (!driver->init_motor())
+    {
+      primary_node = configuration.node_id;
+      primary_failure = "init_motor";
+      break;
+    }
+    if (
+      driver->get_mode() != configuration.operation_mode &&
+      !driver->set_operation_mode(configuration.operation_mode))
+    {
+      primary_node = configuration.node_id;
+      primary_failure = "set_operation_mode";
+      break;
+    }
+
+    motor_data_[configuration.node_id].target.velocity_value = 0.0;
+    const bool target_seeded = driver->set_target(0.0);
+    if (!target_seeded)
+    {
+      primary_node = configuration.node_id;
+      primary_failure = "seed_safe_target";
+      break;
+    }
+    completed_nodes.push_back(configuration.node_id);
+  }
+
+  if (primary_failure.empty())
+  {
+    return CallbackReturn::SUCCESS;
+  }
+
+  std::string rollback_failure;
+  uint8_t rollback_node = 0U;
+  for (const auto & configuration : configurations)
+  {
+    const auto driver_iterator = drivers.find(configuration.node_id);
+    if (driver_iterator == drivers.end())
+    {
+      continue;
+    }
+    auto driver = std::static_pointer_cast<ros2_canopen::Cia402Driver>(driver_iterator->second);
+    bool target_valid = driver->get_mode() == configuration.operation_mode;
+    bool target_result = true;
+    if (target_valid)
+    {
+      motor_data_[configuration.node_id].target.velocity_value = 0.0;
+      target_result = driver->set_target(0.0);
+    }
+    if (target_valid && !target_result && rollback_failure.empty())
+    {
+      rollback_node = configuration.node_id;
+      rollback_failure = "seed_safe_target";
+    }
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+  std::vector<uint8_t> shutdown_order(completed_nodes.rbegin(), completed_nodes.rend());
+  for (const auto & configuration : configurations)
+  {
+    if (
+      std::find(completed_nodes.begin(), completed_nodes.end(), configuration.node_id) ==
+      completed_nodes.end())
+    {
+      shutdown_order.push_back(configuration.node_id);
+    }
+  }
+  for (const auto node_id : shutdown_order)
+  {
+    const auto driver_iterator = drivers.find(node_id);
+    if (driver_iterator == drivers.end())
+    {
+      if (rollback_failure.empty())
+      {
+        rollback_node = node_id;
+        rollback_failure = "driver_lookup";
+      }
+      continue;
+    }
+    auto driver = std::static_pointer_cast<ros2_canopen::Cia402Driver>(driver_iterator->second);
+    if (!driver->shutdown_motor() && rollback_failure.empty())
+    {
+      rollback_node = node_id;
+      rollback_failure = "shutdown_motor";
+    }
+  }
+  if (!rollback_failure.empty())
+  {
+    if (!device_container_->request_nmt_stop_all_nodes())
+    {
+      RCLCPP_ERROR(kLogger, "Activation rollback all-node NMT Stop request failed");
+    }
+    RCLCPP_ERROR(
+      kLogger, "CANopen activation failed at node %u/%s; first rollback failure node %u/%s",
+      primary_node, primary_failure.c_str(), rollback_node, rollback_failure.c_str());
+  }
+  else
+  {
+    RCLCPP_ERROR(
+      kLogger, "CANopen activation failed at node %u/%s; rollback completed", primary_node,
+      primary_failure.c_str());
+  }
+  return CallbackReturn::ERROR;
 }
 
 hardware_interface::CallbackReturn Cia402System::on_deactivate(
   const rclcpp_lifecycle::State & previous_state)
 {
-  return CanopenSystem::on_deactivate(previous_state);
+  auto drivers = device_container_->get_registered_drivers();
+  bool failed = false;
+  uint8_t first_failure_node = 0U;
+  std::string first_failure_stage;
+
+  for (const uint8_t node_id : {2U, 3U})
+  {
+    const auto driver_iterator = drivers.find(node_id);
+    if (driver_iterator == drivers.end())
+    {
+      if (!failed)
+      {
+        failed = true;
+        first_failure_node = node_id;
+        first_failure_stage = "driver_lookup";
+      }
+      continue;
+    }
+    auto driver = std::static_pointer_cast<ros2_canopen::Cia402Driver>(driver_iterator->second);
+    if (driver->get_state() == State402::Switch_On_Disabled)
+    {
+      continue;
+    }
+    motor_data_[node_id].target.velocity_value = 0.0;
+    const bool target_result = driver->set_target(0.0);
+    if (!target_result && !failed)
+    {
+      failed = true;
+      first_failure_node = node_id;
+      first_failure_stage = "seed_safe_target";
+    }
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+  for (const uint8_t node_id : {2U, 3U})
+  {
+    const auto driver_iterator = drivers.find(node_id);
+    if (driver_iterator == drivers.end())
+    {
+      continue;
+    }
+    auto driver = std::static_pointer_cast<ros2_canopen::Cia402Driver>(driver_iterator->second);
+    if (!driver->shutdown_motor() && !failed)
+    {
+      failed = true;
+      first_failure_node = node_id;
+      first_failure_stage = "shutdown_motor";
+    }
+  }
+
+  if (!device_container_->request_nmt_stop_all_nodes() && !failed)
+  {
+    failed = true;
+    first_failure_stage = "nmt_stop";
+  }
+
+  if (!device_container_->shutdown_drivers() && !failed)
+  {
+    failed = true;
+    first_failure_stage = "driver_shutdown";
+  }
+
+  const auto base_result = CanopenSystem::on_deactivate(previous_state);
+  if (failed || base_result != CallbackReturn::SUCCESS)
+  {
+    RCLCPP_ERROR(
+      kLogger, "CANopen deactivation failed at node %u/%s", first_failure_node,
+      first_failure_stage.c_str());
+    return CallbackReturn::ERROR;
+  }
+  return CallbackReturn::SUCCESS;
 }
 
 hardware_interface::return_type Cia402System::read(

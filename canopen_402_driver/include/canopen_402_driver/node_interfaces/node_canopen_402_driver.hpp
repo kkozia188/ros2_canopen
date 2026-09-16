@@ -75,6 +75,7 @@ public:
   virtual void configure(bool called_from_base) override;
   virtual void activate(bool called_from_base) override;
   virtual void deactivate(bool called_from_base) override;
+  virtual void cleanup(bool called_from_base) override;
   virtual void add_to_master() override;
 
   virtual double get_speed() { return motor_->get_speed() * scale_vel_from_dev_; }
@@ -85,6 +86,8 @@ public:
   }
 
   virtual uint16_t get_mode() { return motor_->getMode(); }
+
+  virtual State402::InternalState get_state() { return motor_->getState(); }
 
   /**
    * @brief Service Callback to initialise device
@@ -137,6 +140,13 @@ public:
    * Indicates initialisation procedure result
    */
   bool init_motor();
+
+  /**
+   * @brief Shut the motor down through the upstream CiA402 state machine.
+   *
+   * @return true when Switch On Disabled was reached.
+   */
+  bool shutdown_motor();
 
   /**
    * @brief Service Callback to recover device
