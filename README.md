@@ -1,3 +1,24 @@
+# rt-control 补丁分支说明
+
+本仓库 fork 自 [ros-industrial/ros2_canopen](https://github.com/ros-industrial/ros2_canopen)，
+供 [SevenovaHangzhou/robot_driver](https://github.com/SevenovaHangzhou/robot_driver)
+（拆码垛机器人 RT-Control 实时控制域，两条履带 CANopen 驱动）使用，由其 `deps.repos` 按 SHA 锁定本仓库 `rt-control` 分支。
+
+`rt-control` 分支 = 上游 `humble` 基线 `fef50e54` + 以下补丁（按序，每补丁一个 commit）：
+
+| # | 补丁 | 改动说明 |
+| --- | --- | --- |
+| 0001 | rt-control-lifecycle-and-emcy-stop | 生命周期收敛与 EMCY 停机处理：CiA402 系统在紧急报文/故障时按 RT-Control 停机语义收敛 |
+| 0002 | lely-preconfigured-txqlen | lely 核心库接受预配置的 CAN 发送队列长度（以嵌套补丁形式加入 lely 构建） |
+| 0003 | quiesce-callbacks-before-driver-removal | 移除 driver 前先静默回调，消除关闭路径上的竞态 |
+| 0004 | name-canopen-master-loop-thread | 为 CANopen 主循环线程命名，便于 CPU 亲和性绑定与诊断定位 |
+| 0005 | derive-motor-topology-from-hardware-info | 电机拓扑从 ros2_control hardware info 推导，去除与硬件描述重复的独立配置 |
+
+**升级方式**：fetch 上游并快进本仓库 `humble` 分支 → 将 `rt-control` rebase 到新基线 →
+按 robot_driver 测试体系重新验证 → 更新 robot_driver 的 `deps.repos` 锁定 SHA。
+
+---
+
 # ROS2 CANopen
 
 ## Status
