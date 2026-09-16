@@ -23,6 +23,7 @@
 
 #include "canopen_ros2_control/canopen_system.hpp"
 
+#include <exception>
 #include <limits>
 #include <vector>
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
@@ -38,15 +39,40 @@ namespace canopen_ros2_control
 
 CanopenSystem::CanopenSystem() {}
 
-void CanopenSystem::clean()
+bool CanopenSystem::clean()
 {
-  stop_callback_executor();
+  if (!device_container_ && !executor_ && !spin_thread_ && !init_thread_)
+  {
+    return true;
+  }
+
+  bool success = true;
+  if (device_container_ && !device_container_->request_nmt_stop_all_nodes())
+  {
+    RCLCPP_ERROR(kLogger, "CANopen terminal all-node NMT Stop request failed");
+    success = false;
+  }
+
+  if (!stop_callback_executor())
+  {
+    RCLCPP_ERROR(kLogger, "CANopen callback executor barrier failed");
+    // Driver callbacks may still be in flight. Keep the complete communication
+    // graph alive so lifecycle cleanup can be retried without reintroducing the
+    // callback/use-after-free race guarded by this barrier.
+    return false;
+  }
 
   if (device_container_)
   {
+    if (!device_container_->shutdown_drivers())
+    {
+      RCLCPP_ERROR(kLogger, "CANopen driver shutdown failed");
+      success = false;
+    }
     if (!device_container_->shutdown_master())
     {
       RCLCPP_ERROR(kLogger, "CANopen master shutdown failed");
+      success = false;
     }
   }
 
@@ -59,22 +85,51 @@ void CanopenSystem::clean()
   }
   init_thread_.reset();
   spin_thread_.reset();
+  return success;
 }
 
-void CanopenSystem::stop_callback_executor()
+bool CanopenSystem::stop_callback_executor()
 {
+  bool success = true;
   if (executor_)
   {
-    executor_->cancel();
+    try
+    {
+      executor_->cancel();
+    }
+    catch (const std::exception & exception)
+    {
+      RCLCPP_ERROR(kLogger, "Failed to cancel CANopen callback executor: %s", exception.what());
+      success = false;
+    }
   }
 
   if (spin_thread_ && spin_thread_->joinable())
   {
-    spin_thread_->join();
+    try
+    {
+      spin_thread_->join();
+    }
+    catch (const std::exception & exception)
+    {
+      RCLCPP_ERROR(kLogger, "Failed to join CANopen callback executor: %s", exception.what());
+      success = false;
+    }
   }
+  return success;
 }
 
-CanopenSystem::~CanopenSystem() { clean(); }
+CanopenSystem::~CanopenSystem() noexcept
+{
+  if (!clean())
+  {
+    RCLCPP_FATAL(
+      kLogger,
+      "CanopenSystem destruction could not quiesce CANopen callbacks; terminating before "
+      "callback-owned state is destroyed");
+    std::terminate();
+  }
+}
 
 hardware_interface::CallbackReturn CanopenSystem::on_init(
   const hardware_interface::HardwareInfo & info)
@@ -120,15 +175,19 @@ hardware_interface::CallbackReturn CanopenSystem::on_configure(
 hardware_interface::CallbackReturn CanopenSystem::on_cleanup(
   const rclcpp_lifecycle::State & previous_state)
 {
-  clean();
-  return CallbackReturn::SUCCESS;
+  return clean() ? CallbackReturn::SUCCESS : CallbackReturn::ERROR;
 }
 
 hardware_interface::CallbackReturn CanopenSystem::on_shutdown(
   const rclcpp_lifecycle::State & previous_state)
 {
-  clean();
-  return CallbackReturn::SUCCESS;
+  return clean() ? CallbackReturn::SUCCESS : CallbackReturn::ERROR;
+}
+
+hardware_interface::CallbackReturn CanopenSystem::on_error(
+  const rclcpp_lifecycle::State & previous_state)
+{
+  return clean() ? CallbackReturn::SUCCESS : CallbackReturn::ERROR;
 }
 
 void CanopenSystem::spin()

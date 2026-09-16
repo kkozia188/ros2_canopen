@@ -90,7 +90,19 @@ public:
 
   uint16_t get_mode() { return node_canopen_402_driver_->get_mode(); }
 
+  uint16_t get_actual_mode() { return node_canopen_402_driver_->get_actual_mode(); }
+
   State402::InternalState get_state() { return node_canopen_402_driver_->get_state(); }
+
+  bool lock_operation_mode(uint16_t mode)
+  {
+    return node_canopen_402_driver_->lock_operation_mode(mode);
+  }
+
+  bool is_operation_mode_allowed(uint16_t mode) const
+  {
+    return node_canopen_402_driver_->is_operation_mode_allowed(mode);
+  }
 
   bool set_operation_mode(uint16_t mode)
   {

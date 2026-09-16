@@ -45,6 +45,10 @@ void NodeCanopen402Driver<rclcpp::Node>::init(bool called_from_base)
   NodeCanopenProxyDriver<rclcpp::Node>::init(false);
   publish_joint_state =
     this->node_->create_publisher<sensor_msgs::msg::JointState>("~/joint_states", 1);
+  if (!this->expose_mutating_ros_api_)
+  {
+    return;
+  }
   handle_init_service = this->node_->create_service<std_srvs::srv::Trigger>(
     std::string(this->node_->get_name()).append("/init").c_str(),
     std::bind(
@@ -131,6 +135,10 @@ void NodeCanopen402Driver<rclcpp_lifecycle::LifecycleNode>::init(bool called_fro
   NodeCanopenProxyDriver<rclcpp_lifecycle::LifecycleNode>::init(false);
   publish_joint_state =
     this->node_->create_publisher<sensor_msgs::msg::JointState>("~/joint_states", 10);
+  if (!this->expose_mutating_ros_api_)
+  {
+    return;
+  }
   handle_init_service = this->node_->create_service<std_srvs::srv::Trigger>(
     std::string(this->node_->get_name()).append("/init").c_str(),
     std::bind(
@@ -647,6 +655,14 @@ bool NodeCanopen402Driver<NODETYPE>::halt_motor()
 template <class NODETYPE>
 bool NodeCanopen402Driver<NODETYPE>::set_operation_mode(uint16_t mode)
 {
+  std::scoped_lock operation_mode_lock(operation_mode_mutex_);
+  if (!is_operation_mode_allowed(mode))
+  {
+    RCLCPP_ERROR(
+      this->node_->get_logger(), "Rejected operation mode %u: driver is locked to mode %u", mode,
+      locked_operation_mode_.load(std::memory_order_acquire));
+    return false;
+  }
   if (this->activated_.load())
   {
     if (motor_->getMode() != mode)
@@ -659,6 +675,31 @@ bool NodeCanopen402Driver<NODETYPE>::set_operation_mode(uint16_t mode)
     }
   }
   return false;
+}
+
+template <class NODETYPE>
+bool NodeCanopen402Driver<NODETYPE>::lock_operation_mode(uint16_t mode)
+{
+  std::scoped_lock operation_mode_lock(operation_mode_mutex_);
+  if (mode == MotorBase::No_Mode)
+  {
+    return false;
+  }
+
+  uint16_t unlocked_mode = MotorBase::No_Mode;
+  if (locked_operation_mode_.compare_exchange_strong(
+      unlocked_mode, mode, std::memory_order_acq_rel, std::memory_order_acquire))
+  {
+    return true;
+  }
+  return unlocked_mode == mode;
+}
+
+template <class NODETYPE>
+bool NodeCanopen402Driver<NODETYPE>::is_operation_mode_allowed(uint16_t mode) const
+{
+  const auto locked_mode = locked_operation_mode_.load(std::memory_order_acquire);
+  return locked_mode == MotorBase::No_Mode || locked_mode == mode;
 }
 
 template <class NODETYPE>

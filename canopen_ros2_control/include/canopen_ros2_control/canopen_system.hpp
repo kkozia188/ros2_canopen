@@ -200,7 +200,7 @@ public:
   CANOPEN_ROS2_CONTROL__VISIBILITY_PUBLIC
   CanopenSystem();
   CANOPEN_ROS2_CONTROL__VISIBILITY_PUBLIC
-  ~CanopenSystem();
+  ~CanopenSystem() noexcept override;
   CANOPEN_ROS2_CONTROL__VISIBILITY_PUBLIC
   hardware_interface::CallbackReturn on_init(
     const hardware_interface::HardwareInfo & info) override;
@@ -221,6 +221,10 @@ public:
 
   CANOPEN_ROS2_CONTROL__VISIBILITY_PUBLIC
   hardware_interface::CallbackReturn on_shutdown(
+    const rclcpp_lifecycle::State & previous_state) override;
+
+  CANOPEN_ROS2_CONTROL__VISIBILITY_PUBLIC
+  hardware_interface::CallbackReturn on_error(
     const rclcpp_lifecycle::State & previous_state) override;
 
   CANOPEN_ROS2_CONTROL__VISIBILITY_PUBLIC
@@ -249,8 +253,8 @@ protected:
   std::unique_ptr<std::thread> init_thread_;
 
   void spin();
-  void stop_callback_executor();
-  void clean();
+  virtual bool stop_callback_executor();
+  bool clean();
 
 private:
   void initDeviceContainer();

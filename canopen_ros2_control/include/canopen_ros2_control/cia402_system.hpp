@@ -25,6 +25,8 @@
 #ifndef CANOPEN_ROS2_CONTROL__CIA402_SYSTEM_HPP_
 #define CANOPEN_ROS2_CONTROL__CIA402_SYSTEM_HPP_
 
+#include <atomic>
+
 #include "canopen_402_driver/cia402_driver.hpp"
 #include "canopen_ros2_control/canopen_system.hpp"
 
@@ -86,12 +88,22 @@ public:
   CANOPEN_ROS2_CONTROL__VISIBILITY_PUBLIC
   Cia402System();
   CANOPEN_ROS2_CONTROL__VISIBILITY_PUBLIC
-  ~Cia402System() = default;
+  ~Cia402System() noexcept override;
   CANOPEN_ROS2_CONTROL__VISIBILITY_PUBLIC
   hardware_interface::CallbackReturn on_init(const hardware_interface::HardwareInfo & info);
 
   CANOPEN_ROS2_CONTROL__VISIBILITY_PUBLIC
   hardware_interface::CallbackReturn on_configure(const rclcpp_lifecycle::State & previous_state);
+
+  CANOPEN_ROS2_CONTROL__VISIBILITY_PUBLIC
+  hardware_interface::CallbackReturn on_cleanup(const rclcpp_lifecycle::State & previous_state);
+
+  CANOPEN_ROS2_CONTROL__VISIBILITY_PUBLIC
+  hardware_interface::CallbackReturn on_shutdown(const rclcpp_lifecycle::State & previous_state);
+
+  CANOPEN_ROS2_CONTROL__VISIBILITY_PUBLIC
+  hardware_interface::CallbackReturn on_error(
+    const rclcpp_lifecycle::State & previous_state) override;
 
   CANOPEN_ROS2_CONTROL__VISIBILITY_PUBLIC
   std::vector<hardware_interface::StateInterface> export_state_interfaces();
@@ -115,7 +127,33 @@ protected:
   // can stuff
   std::map<uint, MotorNodeData> motor_data_;
 
+  bool isConfiguredMotorMode(uint8_t node_id, uint16_t operation_mode) const;
+
+  virtual hardware_interface::CallbackReturn configureCommunication();
+
+  virtual hardware_interface::CallbackReturn activateConfiguredMotors();
+
+  virtual hardware_interface::CallbackReturn deactivateConfiguredMotors();
+
+  virtual hardware_interface::return_type readConfiguredMotors();
+
+  bool isMotorSessionActive() const
+  {
+    return motor_session_active_.load(std::memory_order_acquire);
+  }
+
 private:
+  struct MotorConfiguration
+  {
+    std::string joint_name;
+    uint8_t node_id;
+    uint16_t operation_mode;
+  };
+
+  bool configureMotorTopology(const hardware_interface::HardwareInfo & info);
+
+  bool isConfiguredMotorNode(uint8_t node_id) const;
+
   void switchModes(uint id, const std::shared_ptr<ros2_canopen::Cia402Driver> & driver);
 
   void handleInit(uint id, const std::shared_ptr<ros2_canopen::Cia402Driver> & driver);
@@ -125,6 +163,11 @@ private:
   void handleHalt(uint id, const std::shared_ptr<ros2_canopen::Cia402Driver> & driver);
 
   void initDeviceContainer();
+
+  std::vector<MotorConfiguration> motor_configurations_;
+  bool configured_mode_locks_valid_{false};
+  std::atomic<bool> mode_drift_latched_{false};
+  std::atomic<bool> motor_session_active_{false};
 };
 
 }  // namespace canopen_ros2_control

@@ -109,6 +109,11 @@ void NodeCanopenBasicMaster<rclcpp::Node>::init(bool called_from_base)
       &ros2_canopen::node_interfaces::NodeCanopenBasicMaster<rclcpp::Node>::on_sdo_read, this,
       std::placeholders::_1, std::placeholders::_2));
 
+  if (!this->expose_mutating_ros_api_)
+  {
+    return;
+  }
+
   sdo_write_service = this->node_->create_service<canopen_interfaces::srv::COWriteID>(
     std::string(this->node_->get_name()).append("/sdo_write").c_str(),
     std::bind(
@@ -126,6 +131,11 @@ void NodeCanopenBasicMaster<rclcpp_lifecycle::LifecycleNode>::init(bool called_f
       &ros2_canopen::node_interfaces::NodeCanopenBasicMaster<
         rclcpp_lifecycle::LifecycleNode>::on_sdo_read,
       this, std::placeholders::_1, std::placeholders::_2));
+
+  if (!this->expose_mutating_ros_api_)
+  {
+    return;
+  }
 
   sdo_write_service = this->node_->create_service<canopen_interfaces::srv::COWriteID>(
     std::string(this->node_->get_name()).append("/sdo_write").c_str(),

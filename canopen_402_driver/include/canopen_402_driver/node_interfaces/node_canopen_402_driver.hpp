@@ -19,6 +19,9 @@
 #ifndef NODE_CANOPEN_402_DRIVER
 #define NODE_CANOPEN_402_DRIVER
 
+#include <atomic>
+#include <mutex>
+
 #include "canopen_402_driver/motor.hpp"
 #include "canopen_base_driver/lely_driver_bridge.hpp"
 #include "canopen_interfaces/srv/co_target_double.hpp"
@@ -63,6 +66,8 @@ protected:
   double offset_pos_from_dev_;
   ros2_canopen::State402::InternalState switching_state_;
   int homing_timeout_seconds_;
+  std::atomic<uint16_t> locked_operation_mode_{MotorBase::No_Mode};
+  std::mutex operation_mode_mutex_;
 
   void publish();
   virtual void poll_timer_callback() override;
@@ -87,7 +92,23 @@ public:
 
   virtual uint16_t get_mode() { return motor_->getMode(); }
 
+  virtual uint16_t get_actual_mode() { return motor_->getActualMode(); }
+
   virtual State402::InternalState get_state() { return motor_->getState(); }
+
+  /**
+   * @brief Irreversibly restrict runtime mode changes to one configured mode.
+   *
+   * An unlocked driver retains the upstream behavior. The first non-zero mode
+   * locks the driver; repeating the same lock is idempotent and a conflicting
+   * lock is rejected. There is deliberately no unlock API.
+   */
+  bool lock_operation_mode(uint16_t mode);
+
+  /**
+   * @brief Return whether a requested mode is allowed by the current lock.
+   */
+  bool is_operation_mode_allowed(uint16_t mode) const;
 
   /**
    * @brief Service Callback to initialise device

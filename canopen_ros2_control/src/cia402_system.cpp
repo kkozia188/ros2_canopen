@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <exception>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -37,12 +38,41 @@
 namespace
 {
 auto const kLogger = rclcpp::get_logger("Cia402System");
+constexpr uint16_t kTargetVelocityIndex = 0x60FFU;
+
+template <typename Unsigned>
+Unsigned parseUnsignedParameter(const std::string & value, const char * parameter_name)
+{
+  if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos)
+  {
+    throw std::invalid_argument(std::string(parameter_name) + " must be an unsigned integer");
+  }
+  std::size_t parsed_characters = 0U;
+  const auto parsed = std::stoul(value, &parsed_characters, 10);
+  if (parsed_characters != value.size() || parsed > std::numeric_limits<Unsigned>::max())
+  {
+    throw std::out_of_range(std::string(parameter_name) + " is outside its valid range");
+  }
+  return static_cast<Unsigned>(parsed);
+}
 }
 
 namespace canopen_ros2_control
 {
 
 Cia402System::Cia402System() : CanopenSystem() {}
+
+Cia402System::~Cia402System() noexcept
+{
+  if (!clean())
+  {
+    RCLCPP_FATAL(
+      kLogger,
+      "Cia402System destruction could not quiesce CANopen callbacks; terminating before motor "
+      "state is destroyed");
+    std::terminate();
+  }
+}
 
 hardware_interface::CallbackReturn Cia402System::on_init(
   const hardware_interface::HardwareInfo & info)
@@ -52,7 +82,92 @@ hardware_interface::CallbackReturn Cia402System::on_init(
     return CallbackReturn::ERROR;
   }
 
-  return CallbackReturn::SUCCESS;
+  return configureMotorTopology(info) ? CallbackReturn::SUCCESS : CallbackReturn::ERROR;
+}
+
+bool Cia402System::configureMotorTopology(const hardware_interface::HardwareInfo & info)
+{
+  std::vector<MotorConfiguration> configurations;
+  configurations.reserve(info.joints.size());
+  for (const auto & joint : info.joints)
+  {
+    const auto node_parameter = joint.parameters.find("node_id");
+    const auto mode_parameter = joint.parameters.find("operation_mode");
+    if (
+      node_parameter == joint.parameters.end() ||
+      mode_parameter == joint.parameters.end())
+    {
+      RCLCPP_ERROR(
+        kLogger, "Joint %s must define node_id and operation_mode together", joint.name.c_str());
+      return false;
+    }
+    try
+    {
+      const auto node_id = parseUnsignedParameter<uint8_t>(node_parameter->second, "node_id");
+      const auto mode =
+        parseUnsignedParameter<uint16_t>(mode_parameter->second, "operation_mode");
+      if (node_id == 0U || node_id > 127U)
+      {
+        RCLCPP_ERROR(
+          kLogger, "Invalid CANopen node for joint %s: node=%u", joint.name.c_str(), node_id);
+        return false;
+      }
+      if (mode != MotorBase::Profiled_Velocity)
+      {
+        RCLCPP_ERROR(
+          kLogger,
+          "Joint %s uses mode %u, but this system can only seed a safe Profiled Velocity target",
+          joint.name.c_str(), mode);
+        return false;
+      }
+      configurations.push_back({joint.name, node_id, mode});
+    }
+    catch (const std::exception & exception)
+    {
+      RCLCPP_ERROR(
+        kLogger, "Invalid CANopen parameters for joint %s: %s", joint.name.c_str(),
+        exception.what());
+      return false;
+    }
+  }
+  std::sort(
+    configurations.begin(), configurations.end(),
+    [](const MotorConfiguration & lhs, const MotorConfiguration & rhs)
+    { return lhs.node_id < rhs.node_id; });
+  if (configurations.empty())
+  {
+    RCLCPP_ERROR(kLogger, "No configured CiA402 motor joints");
+    return false;
+  }
+  const auto duplicate = std::adjacent_find(
+    configurations.begin(), configurations.end(),
+    [](const MotorConfiguration & lhs, const MotorConfiguration & rhs)
+    { return lhs.node_id == rhs.node_id; });
+  if (duplicate != configurations.end())
+  {
+    RCLCPP_ERROR(kLogger, "CANopen node %u is assigned to more than one joint", duplicate->node_id);
+    return false;
+  }
+
+  motor_configurations_ = std::move(configurations);
+  return true;
+}
+
+bool Cia402System::isConfiguredMotorNode(uint8_t node_id) const
+{
+  return std::any_of(
+    motor_configurations_.begin(), motor_configurations_.end(),
+    [node_id](const MotorConfiguration & configuration)
+    { return configuration.node_id == node_id; });
+}
+
+bool Cia402System::isConfiguredMotorMode(uint8_t node_id, uint16_t operation_mode) const
+{
+  const auto configuration = std::find_if(
+    motor_configurations_.begin(), motor_configurations_.end(),
+    [node_id](const MotorConfiguration & candidate) { return candidate.node_id == node_id; });
+  return configuration != motor_configurations_.end() &&
+         configuration->operation_mode == operation_mode;
 }
 
 void Cia402System::initDeviceContainer()
@@ -66,6 +181,35 @@ void Cia402System::initDeviceContainer()
     info_.hardware_parameters["bus_config"], tmp_master_bin);
   auto drivers = device_container_->get_registered_drivers();
   RCLCPP_INFO(kLogger, "Number of registered drivers: '%lu'", device_container_->count_drivers());
+
+  bool mode_locks_valid = true;
+  for (const auto & configuration : motor_configurations_)
+  {
+    const auto driver_iterator = drivers.find(configuration.node_id);
+    if (driver_iterator == drivers.end())
+    {
+      RCLCPP_ERROR(
+        kLogger, "Cannot lock configured mode for missing CANopen node %u",
+        configuration.node_id);
+      mode_locks_valid = false;
+      continue;
+    }
+    auto driver = std::static_pointer_cast<ros2_canopen::Cia402Driver>(driver_iterator->second);
+    if (!driver->lock_operation_mode(configuration.operation_mode))
+    {
+      RCLCPP_ERROR(
+        kLogger, "Cannot lock CANopen node %u to configured mode %u", configuration.node_id,
+        configuration.operation_mode);
+      mode_locks_valid = false;
+    }
+  }
+  configured_mode_locks_valid_ = mode_locks_valid;
+  if (!configured_mode_locks_valid_)
+  {
+    RCLCPP_ERROR(kLogger, "CANopen configured operation-mode locks are incomplete");
+    return;
+  }
+
   for (auto it = drivers.begin(); it != drivers.end(); it++)
   {
     auto driver = std::static_pointer_cast<ros2_canopen::Cia402Driver>(it->second);
@@ -82,7 +226,7 @@ void Cia402System::initDeviceContainer()
 
     auto emcy_cb = [this](ros2_canopen::COEmcy emcy, uint8_t id)
     {
-      if (emcy.eec == 0U || (id != 2U && id != 3U))
+      if (emcy.eec == 0U || !isConfiguredMotorNode(id))
       {
         return;
       }
@@ -105,10 +249,21 @@ void Cia402System::initDeviceContainer()
 }
 
 hardware_interface::CallbackReturn Cia402System::on_configure(
-  const rclcpp_lifecycle::State & previous_state)
+  const rclcpp_lifecycle::State &)
 {
+  motor_session_active_.store(false, std::memory_order_release);
+  return configureCommunication();
+}
+
+hardware_interface::CallbackReturn Cia402System::configureCommunication()
+{
+  configured_mode_locks_valid_ = false;
   executor_ = std::make_shared<rclcpp::executors::MultiThreadedExecutor>();
-  device_container_ = std::make_shared<ros2_canopen::DeviceContainer>(executor_);
+  auto container_options = rclcpp::NodeOptions().use_global_arguments(false);
+  container_options.parameter_overrides(
+    {rclcpp::Parameter("expose_mutating_ros_api", false)});
+  device_container_ = std::make_shared<ros2_canopen::DeviceContainer>(
+    executor_, "device_container", container_options);
   executor_->add_node(device_container_);
 
   // threads
@@ -134,7 +289,33 @@ hardware_interface::CallbackReturn Cia402System::on_configure(
     RCLCPP_ERROR(kLogger, "Could not join init thread!");
     return CallbackReturn::ERROR;
   }
+  if (!configured_mode_locks_valid_)
+  {
+    RCLCPP_ERROR(kLogger, "CANopen configuration rejected: operation-mode lock failed");
+    return CallbackReturn::ERROR;
+  }
   return CallbackReturn::SUCCESS;
+}
+
+hardware_interface::CallbackReturn Cia402System::on_cleanup(
+  const rclcpp_lifecycle::State & previous_state)
+{
+  motor_session_active_.store(false, std::memory_order_release);
+  return CanopenSystem::on_cleanup(previous_state);
+}
+
+hardware_interface::CallbackReturn Cia402System::on_shutdown(
+  const rclcpp_lifecycle::State & previous_state)
+{
+  motor_session_active_.store(false, std::memory_order_release);
+  return CanopenSystem::on_shutdown(previous_state);
+}
+
+hardware_interface::CallbackReturn Cia402System::on_error(
+  const rclcpp_lifecycle::State & previous_state)
+{
+  motor_session_active_.store(false, std::memory_order_release);
+  return CanopenSystem::on_error(previous_state);
 }
 
 std::vector<hardware_interface::StateInterface> Cia402System::export_state_interfaces()
@@ -170,80 +351,12 @@ std::vector<hardware_interface::CommandInterface> Cia402System::export_command_i
 {
   std::vector<hardware_interface::CommandInterface> command_interfaces;
 
-  // underlying base class export first
-  command_interfaces = CanopenSystem::export_command_interfaces();
-
-  for (uint i = 0; i < info_.joints.size(); i++)
+  command_interfaces.reserve(motor_configurations_.size());
+  for (const auto & configuration : motor_configurations_)
   {
-    if (info_.joints[i].parameters.find("node_id") == info_.joints[i].parameters.end())
-    {
-      // skip adding canopen interfaces
-      continue;
-    }
-
-    const uint8_t node_id = static_cast<uint8_t>(std::stoi(info_.joints[i].parameters["node_id"]));
-
-    // target
     command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      info_.joints[i].name, hardware_interface::HW_IF_POSITION,
-      &motor_data_[node_id].target.position_value));
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      info_.joints[i].name, hardware_interface::HW_IF_VELOCITY,
-      &motor_data_[node_id].target.velocity_value));
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      info_.joints[i].name, hardware_interface::HW_IF_EFFORT,
-      &motor_data_[node_id].target.torque_value));
-    // init
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      info_.joints[i].name, "init_cmd", &motor_data_[node_id].init.ons_cmd));
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      info_.joints[i].name, "init_fbk", &motor_data_[node_id].init.resp));
-
-    // halt
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      info_.joints[i].name, "halt_cmd", &motor_data_[node_id].halt.ons_cmd));
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      info_.joints[i].name, "halt_fbk", &motor_data_[node_id].halt.resp));
-
-    // recover
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      info_.joints[i].name, "recover_cmd", &motor_data_[node_id].recover.ons_cmd));
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      info_.joints[i].name, "recover_fbk", &motor_data_[node_id].recover.resp));
-
-    // set position mode
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      info_.joints[i].name, "position_mode_cmd", &motor_data_[node_id].position_mode.ons_cmd));
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      info_.joints[i].name, "position_mode_fbk", &motor_data_[node_id].position_mode.resp));
-
-    // set velocity mode
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      info_.joints[i].name, "velocity_mode_cmd", &motor_data_[node_id].velocity_mode.ons_cmd));
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      info_.joints[i].name, "velocity_mode_fbk", &motor_data_[node_id].velocity_mode.resp));
-
-    // set cyclic velocity mode
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      info_.joints[i].name, "cyclic_velocity_mode_cmd",
-      &motor_data_[node_id].cyclic_velocity_mode.ons_cmd));
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      info_.joints[i].name, "cyclic_velocity_mode_fbk",
-      &motor_data_[node_id].cyclic_velocity_mode.resp));
-    // set cyclic position mode
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      info_.joints[i].name, "cyclic_position_mode_cmd",
-      &motor_data_[node_id].cyclic_position_mode.ons_cmd));
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      info_.joints[i].name, "cyclic_position_mode_fbk",
-      &motor_data_[node_id].cyclic_position_mode.resp));
-    // set interpolated position mode
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      info_.joints[i].name, "interpolated_position_mode_cmd",
-      &motor_data_[node_id].interpolated_position_mode.ons_cmd));
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      info_.joints[i].name, "interpolated_position_mode_fbk",
-      &motor_data_[node_id].interpolated_position_mode.resp));
+      configuration.joint_name, hardware_interface::HW_IF_VELOCITY,
+      &motor_data_[configuration.node_id].target.velocity_value));
   }
 
   return command_interfaces;
@@ -252,79 +365,32 @@ std::vector<hardware_interface::CommandInterface> Cia402System::export_command_i
 hardware_interface::CallbackReturn Cia402System::on_activate(
   const rclcpp_lifecycle::State & previous_state)
 {
+  motor_session_active_.store(false, std::memory_order_release);
+  if (mode_drift_latched_.load(std::memory_order_acquire))
+  {
+    RCLCPP_ERROR(kLogger, "CANopen activation rejected after a latched operation-mode drift");
+    return CallbackReturn::ERROR;
+  }
   if (CanopenSystem::on_activate(previous_state) != CallbackReturn::SUCCESS)
   {
     return CallbackReturn::ERROR;
   }
 
-  struct MotorConfiguration
+  const auto activation_result = activateConfiguredMotors();
+  if (activation_result == CallbackReturn::SUCCESS)
   {
-    uint8_t node_id;
-    uint16_t operation_mode;
-  };
-
-  std::vector<MotorConfiguration> configurations;
-  for (const auto & joint : info_.joints)
-  {
-    const auto node_parameter = joint.parameters.find("node_id");
-    if (node_parameter == joint.parameters.end())
-    {
-      continue;
-    }
-    const auto mode_parameter = joint.parameters.find("operation_mode");
-    if (mode_parameter == joint.parameters.end())
-    {
-      RCLCPP_ERROR(kLogger, "Joint %s has no operation_mode parameter", joint.name.c_str());
-      return CallbackReturn::ERROR;
-    }
-    try
-    {
-      const auto parsed_node_id = std::stoul(node_parameter->second);
-      const auto parsed_mode = std::stoul(mode_parameter->second);
-      if (
-        parsed_node_id > std::numeric_limits<uint8_t>::max() ||
-        parsed_mode > std::numeric_limits<uint16_t>::max())
-      {
-        throw std::out_of_range("node_id or operation_mode is outside its storage range");
-      }
-      const auto node_id = static_cast<uint8_t>(parsed_node_id);
-      const auto mode = static_cast<uint16_t>(parsed_mode);
-      if (
-        (node_id != 2U && node_id != 3U) || mode != MotorBase::Profiled_Velocity)
-      {
-        RCLCPP_ERROR(
-          kLogger, "Unsupported CANopen activation mapping for joint %s: node=%u mode=%u",
-          joint.name.c_str(), node_id, mode);
-        return CallbackReturn::ERROR;
-      }
-      configurations.push_back({node_id, mode});
-    }
-    catch (const std::exception & exception)
-    {
-      RCLCPP_ERROR(
-        kLogger, "Invalid CANopen parameters for joint %s: %s", joint.name.c_str(),
-        exception.what());
-      return CallbackReturn::ERROR;
-    }
+    motor_session_active_.store(true, std::memory_order_release);
   }
-  std::sort(
-    configurations.begin(), configurations.end(),
-    [](const MotorConfiguration & lhs, const MotorConfiguration & rhs)
-    { return lhs.node_id < rhs.node_id; });
+  return activation_result;
+}
 
-  if (
-    configurations.size() != 2U || configurations[0].node_id != 2U ||
-    configurations[1].node_id != 3U)
-  {
-    RCLCPP_ERROR(kLogger, "Expected exactly CANopen track motor nodes 2 and 3");
-    return CallbackReturn::ERROR;
-  }
-
+hardware_interface::CallbackReturn Cia402System::activateConfiguredMotors()
+{
   auto drivers = device_container_->get_registered_drivers();
   std::vector<uint8_t> completed_nodes;
   std::string primary_failure;
   uint8_t primary_node = 0U;
-  for (const auto & configuration : configurations)
+  for (const auto & configuration : motor_configurations_)
   {
     const auto driver_iterator = drivers.find(configuration.node_id);
     if (driver_iterator == drivers.end())
@@ -359,6 +425,12 @@ hardware_interface::CallbackReturn Cia402System::on_activate(
       primary_failure = "set_operation_mode";
       break;
     }
+    if (driver->get_actual_mode() != configuration.operation_mode)
+    {
+      primary_node = configuration.node_id;
+      primary_failure = "verify_operation_mode";
+      break;
+    }
 
     motor_data_[configuration.node_id].target.velocity_value = 0.0;
     const bool target_seeded = driver->set_target(0.0);
@@ -378,7 +450,7 @@ hardware_interface::CallbackReturn Cia402System::on_activate(
 
   std::string rollback_failure;
   uint8_t rollback_node = 0U;
-  for (const auto & configuration : configurations)
+  for (const auto & configuration : motor_configurations_)
   {
     const auto driver_iterator = drivers.find(configuration.node_id);
     if (driver_iterator == drivers.end())
@@ -402,7 +474,7 @@ hardware_interface::CallbackReturn Cia402System::on_activate(
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
   std::vector<uint8_t> shutdown_order(completed_nodes.rbegin(), completed_nodes.rend());
-  for (const auto & configuration : configurations)
+  for (const auto & configuration : motor_configurations_)
   {
     if (
       std::find(completed_nodes.begin(), completed_nodes.end(), configuration.node_id) ==
@@ -452,13 +524,27 @@ hardware_interface::CallbackReturn Cia402System::on_activate(
 hardware_interface::CallbackReturn Cia402System::on_deactivate(
   const rclcpp_lifecycle::State & previous_state)
 {
+  const bool was_active = motor_session_active_.exchange(false, std::memory_order_acq_rel);
+  const auto motor_result =
+    was_active ? deactivateConfiguredMotors() : CallbackReturn::SUCCESS;
+  const auto base_result = CanopenSystem::on_deactivate(previous_state);
+  if (motor_result != CallbackReturn::SUCCESS || base_result != CallbackReturn::SUCCESS)
+  {
+    return CallbackReturn::ERROR;
+  }
+  return CallbackReturn::SUCCESS;
+}
+
+hardware_interface::CallbackReturn Cia402System::deactivateConfiguredMotors()
+{
   auto drivers = device_container_->get_registered_drivers();
   bool failed = false;
   uint8_t first_failure_node = 0U;
   std::string first_failure_stage;
 
-  for (const uint8_t node_id : {2U, 3U})
+  for (const auto & configuration : motor_configurations_)
   {
+    const uint8_t node_id = configuration.node_id;
     const auto driver_iterator = drivers.find(node_id);
     if (driver_iterator == drivers.end())
     {
@@ -476,7 +562,16 @@ hardware_interface::CallbackReturn Cia402System::on_deactivate(
       continue;
     }
     motor_data_[node_id].target.velocity_value = 0.0;
-    const bool target_result = driver->set_target(0.0);
+    bool target_result = false;
+    if (isConfiguredMotorMode(node_id, driver->get_actual_mode()))
+    {
+      target_result = driver->set_target(0.0);
+    }
+    else
+    {
+      ros2_canopen::COData safe_velocity_command = {kTargetVelocityIndex, 0x00U, 0U};
+      target_result = driver->tpdo_transmit(safe_velocity_command);
+    }
     if (!target_result && !failed)
     {
       failed = true;
@@ -486,8 +581,9 @@ hardware_interface::CallbackReturn Cia402System::on_deactivate(
   }
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
-  for (const uint8_t node_id : {2U, 3U})
+  for (const auto & configuration : motor_configurations_)
   {
+    const uint8_t node_id = configuration.node_id;
     const auto driver_iterator = drivers.find(node_id);
     if (driver_iterator == drivers.end())
     {
@@ -502,22 +598,12 @@ hardware_interface::CallbackReturn Cia402System::on_deactivate(
     }
   }
 
-  if (!device_container_->request_nmt_stop_all_nodes() && !failed)
+  if (failed && !device_container_->request_nmt_stop_all_nodes())
   {
-    failed = true;
-    first_failure_stage = "nmt_stop";
+    RCLCPP_ERROR(kLogger, "CANopen deactivation fallback all-node NMT Stop request failed");
   }
 
-  stop_callback_executor();
-
-  if (!device_container_->shutdown_drivers() && !failed)
-  {
-    failed = true;
-    first_failure_stage = "driver_shutdown";
-  }
-
-  const auto base_result = CanopenSystem::on_deactivate(previous_state);
-  if (failed || base_result != CallbackReturn::SUCCESS)
+  if (failed)
   {
     RCLCPP_ERROR(
       kLogger, "CANopen deactivation failed at node %u/%s", first_failure_node,
@@ -533,85 +619,121 @@ hardware_interface::return_type Cia402System::read(
   // TODO(anyone): read robot states
 
   auto ret_val = CanopenSystem::read(time, period);
+  if (ret_val != hardware_interface::return_type::OK)
+  {
+    return ret_val;
+  }
+  return readConfiguredMotors();
+}
 
+hardware_interface::return_type Cia402System::readConfiguredMotors()
+{
+  if (!device_container_)
+  {
+    return hardware_interface::return_type::ERROR;
+  }
   auto drivers = device_container_->get_registered_drivers();
 
-  for (auto it = canopen_data_.begin(); it != canopen_data_.end(); ++it)
+  for (const auto & configuration : motor_configurations_)
   {
+    const auto driver_iterator = drivers.find(configuration.node_id);
+    if (driver_iterator == drivers.end())
+    {
+      return hardware_interface::return_type::ERROR;
+    }
     auto motion_controller_driver =
-      std::static_pointer_cast<ros2_canopen::Cia402Driver>(drivers[it->first]);
+      std::static_pointer_cast<ros2_canopen::Cia402Driver>(driver_iterator->second);
     // get position
-    motor_data_[it->first].actual_position = motion_controller_driver->get_position();
+    motor_data_[configuration.node_id].actual_position = motion_controller_driver->get_position();
     // get speed
-    motor_data_[it->first].actual_speed = motion_controller_driver->get_speed();
+    motor_data_[configuration.node_id].actual_speed = motion_controller_driver->get_speed();
   }
 
-  return ret_val;
+  return hardware_interface::return_type::OK;
 }
 
 hardware_interface::return_type Cia402System::write(
-  const rclcpp::Time & time, const rclcpp::Duration & period)
+  const rclcpp::Time &, const rclcpp::Duration &)
 {
+  if (mode_drift_latched_.load(std::memory_order_acquire))
+  {
+    for (const auto & configuration : motor_configurations_)
+    {
+      motor_data_[configuration.node_id].target.velocity_value = 0.0;
+    }
+    return hardware_interface::return_type::ERROR;
+  }
+
+  if (!motor_session_active_.load(std::memory_order_acquire))
+  {
+    for (const auto & configuration : motor_configurations_)
+    {
+      motor_data_[configuration.node_id].target.velocity_value = 0.0;
+    }
+    return hardware_interface::return_type::OK;
+  }
+
   auto drivers = device_container_->get_registered_drivers();
 
-  for (auto it = canopen_data_.begin(); it != canopen_data_.end(); ++it)
+  uint8_t drift_node = 0U;
+  uint16_t expected_mode = MotorBase::No_Mode;
+  uint16_t observed_mode = MotorBase::No_Mode;
+  bool driver_missing = false;
+  for (const auto & configuration : motor_configurations_)
   {
-    // TODO(livanov93): check casting
-    auto motion_controller_driver =
-      std::static_pointer_cast<ros2_canopen::Cia402Driver>(drivers[it->first]);
-    // do same as in proxy system first - handle nmt, tpdo, rpdo
-    // reset node nmt
-    if (it->second.nmt_state.reset_command())
+    const auto driver_iterator = drivers.find(configuration.node_id);
+    if (driver_iterator == drivers.end())
     {
-      motion_controller_driver->reset_node_nmt_command();
+      drift_node = configuration.node_id;
+      expected_mode = configuration.operation_mode;
+      driver_missing = true;
+      break;
     }
-
-    // start nmt
-    if (it->second.nmt_state.start_command())
+    auto driver = std::static_pointer_cast<ros2_canopen::Cia402Driver>(driver_iterator->second);
+    observed_mode = driver->get_actual_mode();
+    if (!isConfiguredMotorMode(configuration.node_id, observed_mode))
     {
-      motion_controller_driver->start_node_nmt_command();
+      drift_node = configuration.node_id;
+      expected_mode = configuration.operation_mode;
+      break;
     }
+  }
 
-    // tpdo data one shot mechanism
-    if (it->second.tpdo_data.write_command())
+  if (drift_node != 0U)
+  {
+    bool safe_velocity_failed = false;
+    for (const auto & configuration : motor_configurations_)
     {
-      it->second.tpdo_data.prepare_data();
-      motion_controller_driver->tpdo_transmit(it->second.tpdo_data.original_data);
+      motor_data_[configuration.node_id].target.velocity_value = 0.0;
+      const auto driver_iterator = drivers.find(configuration.node_id);
+      if (driver_iterator == drivers.end())
+      {
+        safe_velocity_failed = true;
+        continue;
+      }
+      auto driver = std::static_pointer_cast<ros2_canopen::Cia402Driver>(driver_iterator->second);
+      ros2_canopen::COData safe_velocity_command = {kTargetVelocityIndex, 0x00U, 0U};
+      if (!driver->tpdo_transmit(safe_velocity_command))
+      {
+        safe_velocity_failed = true;
+      }
     }
+    const bool nmt_stop_requested = device_container_->request_nmt_stop_all_nodes();
+    mode_drift_latched_.store(true, std::memory_order_release);
+    RCLCPP_ERROR(
+      kLogger,
+      "CANopen operation-mode contract failed at node %u: expected=%u observed=%u%s; "
+      "safe_velocity=%s nmt_stop=%s; restart required",
+      drift_node, expected_mode, observed_mode, driver_missing ? " driver_missing" : "",
+      safe_velocity_failed ? "failed" : "requested", nmt_stop_requested ? "requested" : "failed");
+    return hardware_interface::return_type::ERROR;
+  }
 
-    // initialisation
-    handleInit(it->first, motion_controller_driver);
-
-    // halt
-    handleHalt(it->first, motion_controller_driver);
-
-    // recover
-    handleRecover(it->first, motion_controller_driver);
-
-    // mode switching
-    switchModes(it->first, motion_controller_driver);
-
-    const uint16_t & mode = motion_controller_driver->get_mode();
-
-    switch (mode)
-    {
-      case MotorBase::No_Mode:
-        break;
-      case MotorBase::Profiled_Position:
-      case MotorBase::Cyclic_Synchronous_Position:
-      case MotorBase::Interpolated_Position:
-        motion_controller_driver->set_target(motor_data_[it->first].target.position_value);
-        break;
-      case MotorBase::Profiled_Velocity:
-      case MotorBase::Cyclic_Synchronous_Velocity:
-        motion_controller_driver->set_target(motor_data_[it->first].target.velocity_value);
-        break;
-      case MotorBase::Profiled_Torque:
-        motion_controller_driver->set_target(motor_data_[it->first].target.torque_value);
-        break;
-      default:
-        RCLCPP_INFO(kLogger, "Mode %u not supported", mode);
-    }
+  for (const auto & configuration : motor_configurations_)
+  {
+    const auto driver =
+      std::static_pointer_cast<ros2_canopen::Cia402Driver>(drivers.at(configuration.node_id));
+    driver->set_target(motor_data_[configuration.node_id].target.velocity_value);
   }
 
   return hardware_interface::return_type::OK;

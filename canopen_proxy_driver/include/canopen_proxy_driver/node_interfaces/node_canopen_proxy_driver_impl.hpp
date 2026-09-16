@@ -37,12 +37,22 @@ void NodeCanopenProxyDriver<rclcpp::Node>::init(bool called_from_base)
 {
   nmt_state_publisher = this->node_->create_publisher<std_msgs::msg::String>(
     std::string(this->node_->get_name()).append("/nmt_state").c_str(), 10);
+  rpdo_publisher = this->node_->create_publisher<canopen_interfaces::msg::COData>(
+    std::string(this->node_->get_name()).append("/rpdo").c_str(), 10);
+  sdo_read_service = this->node_->create_service<canopen_interfaces::srv::CORead>(
+    std::string(this->node_->get_name()).append("/sdo_read").c_str(),
+    std::bind(
+      &NodeCanopenProxyDriver<rclcpp::Node>::on_sdo_read, this, std::placeholders::_1,
+      std::placeholders::_2));
+
+  if (!this->expose_mutating_ros_api_)
+  {
+    return;
+  }
+
   tpdo_subscriber = this->node_->create_subscription<canopen_interfaces::msg::COData>(
     std::string(this->node_->get_name()).append("/tpdo").c_str(), 10,
     std::bind(&NodeCanopenProxyDriver<rclcpp::Node>::on_tpdo, this, std::placeholders::_1));
-
-  rpdo_publisher = this->node_->create_publisher<canopen_interfaces::msg::COData>(
-    std::string(this->node_->get_name()).append("/rpdo").c_str(), 10);
 
   nmt_state_reset_service = this->node_->create_service<std_srvs::srv::Trigger>(
     std::string(this->node_->get_name()).append("/nmt_reset_node").c_str(),
@@ -54,12 +64,6 @@ void NodeCanopenProxyDriver<rclcpp::Node>::init(bool called_from_base)
     std::string(this->node_->get_name()).append("/nmt_start_node").c_str(),
     std::bind(
       &NodeCanopenProxyDriver<rclcpp::Node>::on_nmt_state_start, this, std::placeholders::_1,
-      std::placeholders::_2));
-
-  sdo_read_service = this->node_->create_service<canopen_interfaces::srv::CORead>(
-    std::string(this->node_->get_name()).append("/sdo_read").c_str(),
-    std::bind(
-      &NodeCanopenProxyDriver<rclcpp::Node>::on_sdo_read, this, std::placeholders::_1,
       std::placeholders::_2));
 
   sdo_write_service = this->node_->create_service<canopen_interfaces::srv::COWrite>(
@@ -74,14 +78,24 @@ void NodeCanopenProxyDriver<rclcpp_lifecycle::LifecycleNode>::init(bool called_f
 {
   nmt_state_publisher = this->node_->create_publisher<std_msgs::msg::String>(
     std::string(this->node_->get_name()).append("/nmt_state").c_str(), 10);
+  rpdo_publisher = this->node_->create_publisher<canopen_interfaces::msg::COData>(
+    std::string(this->node_->get_name()).append("/rpdo").c_str(), 10);
+  sdo_read_service = this->node_->create_service<canopen_interfaces::srv::CORead>(
+    std::string(this->node_->get_name()).append("/sdo_read").c_str(),
+    std::bind(
+      &NodeCanopenProxyDriver<rclcpp_lifecycle::LifecycleNode>::on_sdo_read, this,
+      std::placeholders::_1, std::placeholders::_2));
+
+  if (!this->expose_mutating_ros_api_)
+  {
+    return;
+  }
+
   tpdo_subscriber = this->node_->create_subscription<canopen_interfaces::msg::COData>(
     std::string(this->node_->get_name()).append("/tpdo").c_str(), 10,
     std::bind(
       &NodeCanopenProxyDriver<rclcpp_lifecycle::LifecycleNode>::on_tpdo, this,
       std::placeholders::_1));
-
-  rpdo_publisher = this->node_->create_publisher<canopen_interfaces::msg::COData>(
-    std::string(this->node_->get_name()).append("/rpdo").c_str(), 10);
 
   nmt_state_reset_service = this->node_->create_service<std_srvs::srv::Trigger>(
     std::string(this->node_->get_name()).append("/nmt_reset_node").c_str(),
@@ -93,12 +107,6 @@ void NodeCanopenProxyDriver<rclcpp_lifecycle::LifecycleNode>::init(bool called_f
     std::string(this->node_->get_name()).append("/nmt_start_node").c_str(),
     std::bind(
       &NodeCanopenProxyDriver<rclcpp_lifecycle::LifecycleNode>::on_nmt_state_start, this,
-      std::placeholders::_1, std::placeholders::_2));
-
-  sdo_read_service = this->node_->create_service<canopen_interfaces::srv::CORead>(
-    std::string(this->node_->get_name()).append("/sdo_read").c_str(),
-    std::bind(
-      &NodeCanopenProxyDriver<rclcpp_lifecycle::LifecycleNode>::on_sdo_read, this,
       std::placeholders::_1, std::placeholders::_2));
 
   sdo_write_service = this->node_->create_service<canopen_interfaces::srv::COWrite>(

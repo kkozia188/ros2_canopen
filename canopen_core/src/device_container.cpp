@@ -16,6 +16,8 @@
 #include "canopen_core/device_container.hpp"
 #include "canopen_core/device_container_error.hpp"
 
+#include <utility>
+
 using namespace ros2_canopen;
 
 void DeviceContainer::set_executor(const std::weak_ptr<rclcpp::Executor> executor)
@@ -244,6 +246,8 @@ bool DeviceContainer::load_master()
       params.push_back(rclcpp::Parameter("node_id", (int)node_id.value()));
       params.push_back(rclcpp::Parameter("non_transmit_timeout", 100));
       params.push_back(rclcpp::Parameter("config", config_->dump_device(*it)));
+      params.push_back(
+        rclcpp::Parameter("expose_mutating_ros_api", expose_mutating_ros_api_));
 
       if (!this->load_component(
             package_name.value(), driver_name.value(), node_id.value(), *it, params,
@@ -253,6 +257,14 @@ bool DeviceContainer::load_master()
         return false;
       }
 
+      if (!expose_mutating_ros_api_ && can_master_->is_lifecycle())
+      {
+        RCLCPP_ERROR(
+          this->get_logger(),
+          "Restricted embedded mode does not support a lifecycle CANopen master");
+        can_master_.reset();
+        return false;
+      }
       add_node_to_executor(can_master_->get_node_base_interface());
       can_master_->init();
       master_found = true;
@@ -320,6 +332,8 @@ bool DeviceContainer::load_drivers()
       params.push_back(rclcpp::Parameter("node_id", (int)node_id.value()));
       params.push_back(rclcpp::Parameter("config", config_->dump_device(*it)));
       params.push_back(rclcpp::Parameter("non_transmit_timeout", 100));
+      params.push_back(
+        rclcpp::Parameter("expose_mutating_ros_api", expose_mutating_ros_api_));
 
       if (!this->load_component(
             package_name.value(), driver_name.value(), node_id.value(), *it, params,
@@ -330,6 +344,29 @@ bool DeviceContainer::load_drivers()
           "Loading driver failed: node_id(%hu), node_name(%s), driver(%s), driver_package(%s)",
           node_id.value(), it->c_str(), driver_name.value().c_str(), package_name.value().c_str());
         return false;
+      }
+      if (!expose_mutating_ros_api_)
+      {
+        try
+        {
+          auto executor = can_master_->get_executor();
+          auto master = can_master_->get_master();
+          if (!executor || !master)
+          {
+            RCLCPP_ERROR(
+              this->get_logger(), "Direct master attachment returned an invalid master");
+            return false;
+          }
+          registered_drivers_.at(node_id.value())
+            ->set_master(std::move(executor), std::move(master));
+        }
+        catch (const std::exception & exception)
+        {
+          RCLCPP_ERROR(
+            this->get_logger(), "Direct master attachment failed for node %hu: %s",
+            node_id.value(), exception.what());
+          return false;
+        }
       }
       add_node_to_executor(registered_drivers_[node_id.value()]->get_node_base_interface());
       registered_drivers_[node_id.value()]->init();
@@ -342,6 +379,13 @@ bool DeviceContainer::load_manager()
 {
   if (this->lifecycle_operation_)
   {
+    if (!expose_mutating_ros_api_)
+    {
+      RCLCPP_ERROR(
+        this->get_logger(),
+        "Restricted embedded mode refuses the lifecycle manager mutation surface");
+      return false;
+    }
     RCLCPP_INFO(this->get_logger(), "Loading Manager Configuration.");
     auto node_options = rclcpp::NodeOptions();
     node_options.use_global_arguments(false);

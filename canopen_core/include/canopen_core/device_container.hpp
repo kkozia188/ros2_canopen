@@ -63,12 +63,17 @@ public:
     this->declare_parameter<std::string>("master_config", "");
     this->declare_parameter<std::string>("bus_config", "");
     this->declare_parameter<std::string>("master_bin", "");
+    this->declare_parameter<bool>("expose_mutating_ros_api", true);
+    this->get_parameter("expose_mutating_ros_api", expose_mutating_ros_api_);
     client_cbg_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-    init_driver_service_ = this->create_service<canopen_interfaces::srv::CONode>(
-      "~/init_driver",
-      std::bind(
-        &DeviceContainer::on_init_driver, this, std::placeholders::_1, std::placeholders::_2),
-      rmw_qos_profile_services_default, client_cbg_);
+    if (expose_mutating_ros_api_)
+    {
+      init_driver_service_ = this->create_service<canopen_interfaces::srv::CONode>(
+        "~/init_driver",
+        std::bind(
+          &DeviceContainer::on_init_driver, this, std::placeholders::_1, std::placeholders::_2),
+        rmw_qos_profile_services_default, client_cbg_);
+    }
 
     this->loadNode_srv_.reset();
     this->unloadNode_srv_.reset();
@@ -206,7 +211,7 @@ public:
    *
    * @return true when the request was submitted to the active master.
    */
-  bool request_nmt_stop_all_nodes()
+  virtual bool request_nmt_stop_all_nodes()
   {
     try
     {
@@ -229,7 +234,7 @@ public:
    *
    * @return true when every driver shutdown completed.
    */
-  bool shutdown_drivers()
+  virtual bool shutdown_drivers()
   {
     bool success = true;
     for (const auto & entry : registered_drivers_)
@@ -254,7 +259,7 @@ public:
    *
    * @return true when master shutdown completed or no master exists.
    */
-  bool shutdown_master()
+  virtual bool shutdown_master()
   {
     if (!can_master_)
     {
@@ -353,6 +358,7 @@ protected:
   std::string dcf_bin_;             ///< Cached value of .bin file parameter
   std::string can_interface_name_;  ///< Cached value of can interface name
   bool lifecycle_operation_;
+  bool expose_mutating_ros_api_{true};
 
   // ROS Objects
   std::weak_ptr<rclcpp::Executor> executor_;  ///< Pointer to ros executor instance

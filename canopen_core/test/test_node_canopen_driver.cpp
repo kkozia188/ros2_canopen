@@ -127,6 +127,7 @@ TEST_F(NodeCanopenDriverTest, test_set_master)
 
   node_canopen_driver->set_master(exec, master);
   EXPECT_TRUE(node_canopen_driver->master_set_.load());
+  EXPECT_NO_THROW(node_canopen_driver->demand_set_master());
 
   node_canopen_driver->configured_.store(true);
   node_canopen_driver->activated_.store(true);
@@ -135,8 +136,14 @@ TEST_F(NodeCanopenDriverTest, test_set_master)
 
   node_canopen_driver->configured_.store(false);
   node_canopen_driver->activated_.store(false);
+  node_canopen_driver->initialised_.store(true);
 
   EXPECT_THROW(node_canopen_driver->set_master(exec, master), DriverException);
+
+  node_canopen_driver->initialised_.store(false);
+
+  EXPECT_NO_THROW(node_canopen_driver->set_master(exec, master));
+  EXPECT_TRUE(node_canopen_driver->master_set_.load());
 }
 
 TEST_F(NodeCanopenDriverTest, test_configure)

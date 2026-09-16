@@ -38,6 +38,10 @@
 namespace ros2_canopen
 {
 
+static_assert(
+  std::atomic<uint16_t>::is_always_lock_free,
+  "CiA402 actual-mode snapshots must remain lock-free for the control loop");
+
 typedef ModeForwardHelper<MotorBase::Profiled_Velocity, int32_t, 0x60FF, 0, 0> ProfiledVelocityMode;
 typedef ModeForwardHelper<MotorBase::Profiled_Torque, int16_t, 0x6071, 0, 0> ProfiledTorqueMode;
 typedef ModeForwardHelper<MotorBase::Cyclic_Synchronous_Position, int32_t, 0x607A, 0, 0>
@@ -75,6 +79,7 @@ public:
   virtual bool enterModeAndWait(uint16_t mode);
   virtual bool isModeSupported(uint16_t mode);
   virtual uint16_t getMode();
+  uint16_t getActualMode() noexcept;
 
   State402::InternalState getState() { return state_handler_.getState(); }
   bool readState();
@@ -233,7 +238,7 @@ private:
   std::unordered_map<uint16_t, AllocFuncType> mode_allocators_;
 
   ModeSharedPtr selected_mode_;
-  uint16_t mode_id_;
+  std::atomic<uint16_t> mode_id_{MotorBase::No_Mode};
   std::condition_variable mode_cond_;
   std::mutex mode_mutex_;
   const State402::InternalState switching_state_;

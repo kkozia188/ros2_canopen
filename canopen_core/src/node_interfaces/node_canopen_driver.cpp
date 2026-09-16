@@ -22,6 +22,11 @@ void ros2_canopen::node_interfaces::NodeCanopenDriver<rclcpp::Node>::demand_set_
   {
     throw ros2_canopen::DriverException("Set Master: driver is not configured");
   }
+  if (master_set_.load())
+  {
+    RCLCPP_DEBUG(node_->get_logger(), "Master was attached in process; skipping init service");
+    return;
+  }
   std::string init_service_name = container_name_ + "/init_driver";
   RCLCPP_DEBUG(node_->get_logger(), "Service: %s", init_service_name.c_str());
   rclcpp::Client<canopen_interfaces::srv::CONode>::SharedPtr demand_set_master_client;
@@ -65,6 +70,11 @@ void ros2_canopen::node_interfaces::NodeCanopenDriver<
   if (!configured_.load())
   {
     throw ros2_canopen::DriverException("Set Master: driver is not configured");
+  }
+  if (master_set_.load())
+  {
+    RCLCPP_DEBUG(node_->get_logger(), "Master was attached in process; skipping init service");
+    return;
   }
   std::string init_service_name = container_name_ + "/init_driver";
   rclcpp::Client<canopen_interfaces::srv::CONode>::SharedPtr demand_set_master_client;

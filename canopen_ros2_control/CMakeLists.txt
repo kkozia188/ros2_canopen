@@ -60,8 +60,9 @@ install(
 )
 
 if(BUILD_TESTING)
-  #find_package(ament_cmake_gmock REQUIRED)
-  #find_package(ros2_control_test_assets REQUIRED)
+  ament_add_gmock(test_cia402_hardware_info test/test_cia402_hardware_info.cpp)
+  target_link_libraries(test_cia402_hardware_info canopen_ros2_control)
+  ament_target_dependencies(test_cia402_hardware_info hardware_interface)
 
   #ament_add_gmock(test_canopen_system test/test_canopen_system.cpp)
   #target_include_directories(test_canopen_system PRIVATE include)

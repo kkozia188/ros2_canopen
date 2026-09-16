@@ -17,6 +17,46 @@
 #include "canopen_master_driver/node_interfaces/node_canopen_basic_master.hpp"
 #include "gtest/gtest.h"
 
+TEST(NodeCanopenBasicMaster, restricted_mode_omits_sdo_write_service)
+{
+  rclcpp::init(0, nullptr);
+  {
+    auto options = rclcpp::NodeOptions().use_global_arguments(false);
+    options.parameter_overrides(
+      {rclcpp::Parameter("expose_mutating_ros_api", false)});
+    rclcpp::Node node("restricted_master", options);
+    ros2_canopen::node_interfaces::NodeCanopenBasicMaster<rclcpp::Node> interface(&node);
+    auto * base_interface =
+      static_cast<ros2_canopen::node_interfaces::NodeCanopenMasterInterface *>(&interface);
+    ASSERT_NO_THROW(base_interface->init());
+
+    const auto services =
+      node.get_service_names_and_types_by_node(node.get_name(), node.get_namespace());
+    EXPECT_EQ(services.count("/restricted_master/sdo_read"), 1U);
+    EXPECT_EQ(services.count("/restricted_master/sdo_write"), 0U);
+  }
+  rclcpp::shutdown();
+}
+
+TEST(NodeCanopenBasicMaster, standalone_mode_exposes_sdo_write_service_by_default)
+{
+  rclcpp::init(0, nullptr);
+  {
+    auto options = rclcpp::NodeOptions().use_global_arguments(false);
+    rclcpp::Node node("standalone_master", options);
+    ros2_canopen::node_interfaces::NodeCanopenBasicMaster<rclcpp::Node> interface(&node);
+    auto * base_interface =
+      static_cast<ros2_canopen::node_interfaces::NodeCanopenMasterInterface *>(&interface);
+    ASSERT_NO_THROW(base_interface->init());
+
+    const auto services =
+      node.get_service_names_and_types_by_node(node.get_name(), node.get_namespace());
+    EXPECT_EQ(services.count("/standalone_master/sdo_read"), 1U);
+    EXPECT_EQ(services.count("/standalone_master/sdo_write"), 1U);
+  }
+  rclcpp::shutdown();
+}
+
 TEST(NodeCanopenBasicMaster, test_good_sequence_advanced)
 {
   rclcpp::init(0, nullptr);

@@ -45,6 +45,11 @@ uint16_t Motor402::getMode()
   return selected_mode_ ? selected_mode_->mode_id_ : (uint16_t)MotorBase::No_Mode;
 }
 
+uint16_t Motor402::getActualMode() noexcept
+{
+  return mode_id_.load(std::memory_order_relaxed);
+}
+
 bool Motor402::isModeSupportedByDevice(uint16_t mode)
 {
   if (mode == MotorBase::Homing)
@@ -116,7 +121,9 @@ bool Motor402::switchMode(uint16_t mode)
   {  // disable mode handler
     std::scoped_lock lock(mode_mutex_);
 
-    if (mode_id_ == mode && selected_mode_ && selected_mode_->mode_id_ == mode)
+    if (
+      mode_id_.load(std::memory_order_relaxed) == mode && selected_mode_ &&
+      selected_mode_->mode_id_ == mode)
     {
       // nothing to do
       return true;
@@ -138,13 +145,17 @@ bool Motor402::switchMode(uint16_t mode)
       std::chrono::steady_clock::now() + std::chrono::seconds(5);
     if (monitor_mode_)
     {
-      while (mode_id_ != mode && mode_cond_.wait_until(lock, abstime) == std::cv_status::no_timeout)
+      while (
+        mode_id_.load(std::memory_order_relaxed) != mode &&
+        mode_cond_.wait_until(lock, abstime) == std::cv_status::no_timeout)
       {
       }
     }
     else
     {
-      while (mode_id_ != mode && std::chrono::steady_clock::now() < abstime)
+      while (
+        mode_id_.load(std::memory_order_relaxed) != mode &&
+        std::chrono::steady_clock::now() < abstime)
       {
         lock.unlock();                                                    // unlock inside loop
         driver->universal_get_value<int8_t>(op_mode_display_index, 0x0);  // poll
@@ -153,7 +164,7 @@ bool Motor402::switchMode(uint16_t mode)
       }
     }
 
-    if (mode_id_ == mode)
+    if (mode_id_.load(std::memory_order_relaxed) == mode)
     {
       selected_mode_ = next_mode;
       okay = true;
@@ -165,7 +176,8 @@ bool Motor402::switchMode(uint16_t mode)
     else
     {
       RCLCPP_INFO(rclcpp::get_logger("canopen_402_driver"), "Mode switch timed out.");
-      driver->universal_set_value<int8_t>(op_mode_index, 0x0, mode_id_);
+      driver->universal_set_value<int8_t>(
+        op_mode_index, 0x0, mode_id_.load(std::memory_order_relaxed));
       if (enable_diagnostics_.load())
       {
         this->diag_collector_->addf("cia402_mode", "Mode switch timed out: %d", mode);
@@ -233,9 +245,9 @@ bool Motor402::readState()
       RCLCPP_INFO(rclcpp::get_logger("canopen_402_driver"), "Mode handler has error.");
     }
   }
-  if (new_mode != mode_id_)
+  if (new_mode != mode_id_.load(std::memory_order_relaxed))
   {
-    mode_id_ = new_mode;
+    mode_id_.store(new_mode, std::memory_order_relaxed);
     mode_cond_.notify_all();
   }
   if (selected_mode_ && selected_mode_->mode_id_ != new_mode)
@@ -266,7 +278,9 @@ void Motor402::handleWrite()
     std::scoped_lock lock(mode_mutex_);
     Mode::OpModeAccesser cwa(control_word_);
     bool okay = false;
-    if (selected_mode_ && selected_mode_->mode_id_ == mode_id_)
+    if (
+      selected_mode_ &&
+      selected_mode_->mode_id_ == mode_id_.load(std::memory_order_relaxed))
     {
       okay = selected_mode_->write(cwa);
     }

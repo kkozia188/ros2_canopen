@@ -89,6 +89,7 @@ protected:
   std::string master_bin_;
   std::string can_interface_name_;
   uint32_t timeout_;
+  bool expose_mutating_ros_api_{true};
 
   std::thread spinner_;
 
@@ -124,6 +125,8 @@ public:
     node_->declare_parameter("node_id", 0);
     node_->declare_parameter("non_transmit_timeout", 100);
     node_->declare_parameter("config", "");
+    node_->declare_parameter("expose_mutating_ros_api", true);
+    node_->get_parameter("expose_mutating_ros_api", expose_mutating_ros_api_);
     this->init(true);
     this->initialised_.store(true);
     RCLCPP_DEBUG(node_->get_logger(), "init_end");

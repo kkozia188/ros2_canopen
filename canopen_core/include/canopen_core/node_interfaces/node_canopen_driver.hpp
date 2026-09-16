@@ -76,6 +76,7 @@ protected:
   std::string container_name_;
   std::string eds_;
   std::string bin_;
+  bool expose_mutating_ros_api_{true};
 
   rclcpp::CallbackGroup::SharedPtr client_cbg_;
   rclcpp::CallbackGroup::SharedPtr timer_cbg_;
@@ -103,13 +104,13 @@ public:
     std::shared_ptr<lely::ev::Executor> exec, std::shared_ptr<lely::canopen::AsyncMaster> master)
   {
     RCLCPP_DEBUG(node_->get_logger(), "set_master_start");
-    if (!configured_.load())
-    {
-      throw DriverException("Set Master: driver is not configured");
-    }
     if (activated_.load())
     {
-      throw DriverException("Set Master: driver is not activated");
+      throw DriverException("Set Master: driver is already activated");
+    }
+    if (initialised_.load() && !configured_.load())
+    {
+      throw DriverException("Set Master: driver initialization is in progress");
     }
     this->exec_ = exec;
     this->master_ = master;
@@ -142,6 +143,8 @@ public:
     node_->declare_parameter("node_id", 0);
     node_->declare_parameter("non_transmit_timeout", 100);
     node_->declare_parameter("config", "");
+    node_->declare_parameter("expose_mutating_ros_api", true);
+    node_->get_parameter("expose_mutating_ros_api", expose_mutating_ros_api_);
     this->init(true);
     this->initialised_.store(true);
     RCLCPP_DEBUG(node_->get_logger(), "init_end");
