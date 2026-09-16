@@ -1,0 +1,12 @@
+diff --git a/src/io2/linux/can_ctrl.c b/src/io2/linux/can_ctrl.c
+index f834ebfb6e76b80410c1d2afe4e48e0a07649220..81f34f5b85ed3b81d0cb967de8a096d957f6bef9 100644
+--- a/src/io2/linux/can_ctrl.c
++++ b/src/io2/linux/can_ctrl.c
+@@ -125 +125,6 @@ io_can_ctrl_init(io_can_ctrl_t *ctrl, unsigned int index, size_t txlen)
+-	if (io_if_set_txqlen(ARPHRD_CAN, impl->index, txlen) == -1)
++	__u32 current_txlen = 0;
++	if (io_if_get_txqlen(ARPHRD_CAN, impl->index, &current_txlen) == -1)
++		return NULL;
++
++	if (current_txlen != txlen
++			&& io_if_set_txqlen(ARPHRD_CAN, impl->index, txlen) == -1)
