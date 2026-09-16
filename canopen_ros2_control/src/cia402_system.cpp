@@ -508,6 +508,8 @@ hardware_interface::CallbackReturn Cia402System::on_deactivate(
     first_failure_stage = "nmt_stop";
   }
 
+  stop_callback_executor();
+
   if (!device_container_->shutdown_drivers() && !failed)
   {
     failed = true;

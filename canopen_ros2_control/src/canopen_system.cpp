@@ -40,15 +40,7 @@ CanopenSystem::CanopenSystem() {}
 
 void CanopenSystem::clean()
 {
-  if (executor_)
-  {
-    executor_->cancel();
-  }
-
-  if (spin_thread_ && spin_thread_->joinable())
-  {
-    spin_thread_->join();
-  }
+  stop_callback_executor();
 
   if (device_container_)
   {
@@ -67,6 +59,19 @@ void CanopenSystem::clean()
   }
   init_thread_.reset();
   spin_thread_.reset();
+}
+
+void CanopenSystem::stop_callback_executor()
+{
+  if (executor_)
+  {
+    executor_->cancel();
+  }
+
+  if (spin_thread_ && spin_thread_->joinable())
+  {
+    spin_thread_->join();
+  }
 }
 
 CanopenSystem::~CanopenSystem() { clean(); }
