@@ -17,6 +17,9 @@
 
 #include <yaml-cpp/yaml.h>
 #include <atomic>
+#ifdef __linux__
+#include <pthread.h>
+#endif
 #include <lely/coapp/master.hpp>
 #include <lely/coapp/slave.hpp>
 #include <lely/ev/exec.hpp>
@@ -229,6 +232,9 @@ public:
     this->spinner_ = std::thread(
       [this]()
       {
+#ifdef __linux__
+        (void)pthread_setname_np(pthread_self(), "rtcan-master");
+#endif
         try
         {
           loop_->run();
